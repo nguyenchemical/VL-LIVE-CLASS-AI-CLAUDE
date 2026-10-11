@@ -95,7 +95,7 @@
     <header class="border-b border-slate-800 bg-slate-950/90 backdrop-blur-md shrink-0 py-2.5 px-3">
         <div class="max-w-6xl mx-auto flex justify-between items-center">
             <div class="flex items-center gap-2 min-w-0">
-                <img src="icon.png" alt="Vietlott Claude AI" class="h-9 w-9 sm:h-11 sm:w-11 md:h-12 md:w-12 rounded-2xl object-cover shadow-md shrink-0">
+                <img src="icon.png" alt="Vietlott Live Class Claude AI" class="h-9 w-9 sm:h-11 sm:w-11 md:h-12 md:w-12 rounded-2xl object-cover shadow-md shrink-0">
                 <div class="min-w-0">
                     <h1 class="text-xs sm:text-base font-extrabold bg-gradient-to-r from-red-500 via-amber-400 to-emerald-400 bg-clip-text text-transparent leading-none truncate">
                         VIETLOTT LIVE CLASS CLAUDE AI
@@ -159,7 +159,7 @@
                 <label class="block text-[10px] font-bold uppercase text-slate-400 mb-1 flex items-center gap-1">
                     <i data-lucide="cpu" class="w-3 h-3 text-indigo-400"></i> Thuật toán AI Model
                 </label>
-                <select id="algo-type" onchange="renderAutoAlgoHint()" class="w-full bg-slate-950 border border-slate-700 rounded-lg p-1.5 text-xs font-medium focus:ring-1 focus:ring-red-500 outline-none text-slate-200">
+                <select id="algo-type" onchange="renderAutoAlgoHint(); resetJackpotMeter();" class="w-full bg-slate-950 border border-slate-700 rounded-lg p-1.5 text-xs font-medium focus:ring-1 focus:ring-red-500 outline-none text-slate-200">
                     <option value="auto" selected>⚡ Tự động chọn (khuyến nghị)</option>
                     <option value="markov-chain">Markov Chain Probability Model</option>
                     <option value="tf-lstm">Time Series Tensor Pattern Model</option>
@@ -771,11 +771,13 @@
                 statusEl.className = "inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20";
                 return true;
             } catch (error) {
-                console.warn("Kích hoạt bộ dữ liệu dự phòng:", error);
-                if (isInitialLoad || !rawDraws || rawDraws.length < 1) rawDraws = generateSyntheticData(gameType);
+                console.warn("Không lấy được dữ liệu thật lúc này:", error);
+                // KHÔNG còn bịa dữ liệu mô phỏng — nếu chưa có kỳ thật nào đã lưu, rawDraws giữ nguyên
+                // mảng rỗng, để giao diện hiện đúng trạng thái "chưa có dữ liệu thật" thay vì số giả.
+                if (isInitialLoad && (!rawDraws || rawDraws.length < 1)) rawDraws = [];
                 const now = formatClock(new Date());
-                statusEl.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-blue-400"></span><span>Backup · thử lại lúc ${now}</span>`;
-                statusEl.className = "inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20";
+                statusEl.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span><span>Chưa có dữ liệu · thử lại lúc ${now}</span>`;
+                statusEl.className = "inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20";
                 return false;
             }
         }
@@ -894,9 +896,30 @@
         }
 
         async function fetchRealVietlottData(gameType) {
-            // 1) Ưu tiên dữ liệu đã ĐỒNG BỘ SẴN trong repo (do GitHub Actions tự cập nhật định kỳ, xem
-            //    .github/workflows/update-vietlott-data.yml) — đây là kho lịch sử THẬT dùng chung cho
-            //    mọi thiết bị, đồng bộ tự động mỗi lần mở app mà không cần token hay cấu hình gì thêm.
+            // 1a) Ưu tiên CAO NHẤT: đọc thẳng từ Workers KV qua chính Worker (?action=get-draws) — nhanh,
+            //     không phụ thuộc độ trễ cache của GitHub Pages, và không cần GitHub Token hoạt động.
+            if (OWN_PROXY_URL) {
+                try {
+                    const kvBase = OWN_PROXY_URL.replace(/\?url=$/, '');
+                    const resKv = await fetchWithTimeout(`${kvBase}?action=get-draws&game=${gameType}&t=${Date.now()}`, {}, 4000);
+                    if (resKv.ok) {
+                        const listKv = await resKv.json();
+                        if (Array.isArray(listKv) && listKv.length >= 1) {
+                            mergeIntoArchive(gameType, listKv);
+                            logTrain(`<b class="text-emerald-400">[Data]</b> Đồng bộ ${listKv.length} kỳ từ Workers KV (dùng chung mọi thiết bị, không qua GitHub Pages)`);
+                        } else {
+                            logTrain(`<span class="text-amber-400">[Data]</span> KV chưa có dữ liệu cho ${gameType} (Worker chưa ghi lần nào) — thử nguồn data/${gameType}.json trong repo bên dưới`);
+                        }
+                    } else {
+                        logTrain(`<span class="text-amber-400">[Data]</span> Không đọc được KV (HTTP ${resKv.status}) — thử nguồn data/${gameType}.json trong repo bên dưới`);
+                    }
+                } catch (e) {
+                    logTrain(`<span class="text-amber-400">[Data]</span> Lỗi khi đọc KV: ${e.message || e} — thử nguồn data/${gameType}.json trong repo bên dưới`);
+                }
+            }
+
+            // 1b) Dự phòng: dữ liệu đã ĐỒNG BỘ SẴN trong repo qua GitHub Pages (do Worker ghi vào
+            //     data/<game>.json mỗi lần Cron chạy) — vẫn hữu ích nếu KV chưa được gắn binding.
             try {
                 const resRepo = await fetchWithTimeout(`data/${gameType}.json?t=${Date.now()}`, {}, 4000);
                 if (resRepo.ok) {
@@ -910,10 +933,21 @@
                         if (repoEntries.length >= 1) {
                             mergeIntoArchive(gameType, repoEntries);
                             logTrain(`<b class="text-emerald-400">[Data]</b> Đồng bộ ${repoEntries.length} kỳ từ data/${gameType}.json trong repo (dùng chung mọi thiết bị)`);
+                        } else {
+                            logTrain(`<span class="text-amber-400">[Data]</span> File data/${gameType}.json tồn tại nhưng rỗng/đọc không ra kỳ nào`);
                         }
+                    } else {
+                        logTrain(`<span class="text-amber-400">[Data]</span> data/${gameType}.json rỗng (chưa có kỳ nào được Worker ghi vào)`);
                     }
+                } else if (resRepo.status === 404) {
+                    // Đây CHÍNH là dấu hiệu Worker (Cron/run-now) chưa từng ghi thành công file này vào repo.
+                    logTrain(`<span class="text-amber-400">[Data]</span> Chưa có data/${gameType}.json trong repo (404) — Worker chưa ghi lần nào cho loại vé này, dùng tạm dữ liệu trực tiếp từ vietlott.vn bên dưới`);
+                } else {
+                    logTrain(`<span class="text-amber-400">[Data]</span> Không đọc được data/${gameType}.json (HTTP ${resRepo.status})`);
                 }
-            } catch (e) { /* chưa có file trong repo -> vẫn tiếp tục lấy trực tiếp từ vietlott.vn bên dưới */ }
+            } catch (e) {
+                logTrain(`<span class="text-amber-400">[Data]</span> Lỗi khi đồng bộ data/${gameType}.json: ${e.message || e} — dùng tạm dữ liệu trực tiếp từ vietlott.vn bên dưới`);
+            }
 
             // 2) Đọc trực tiếp trang kết quả HTML thật của vietlott.vn — ưu tiên proxy riêng (nếu đã cấu hình),
             //    sau đó lần lượt các proxy công cộng. Vietlott không có JSON API công khai, nên lấy đúng
@@ -954,14 +988,9 @@
                         lsSet(LS_KEYS.lastSeenDraw, lastSeenMap);
                         saveRealDrawToArchive(gameType, latestDraw);
 
-                        // Kết hợp toàn bộ kho lịch sử THẬT đã tích luỹ (nhiều nhất có thể) với dữ liệu mô phỏng
-                        // bù thêm cho đủ chuỗi cần thiết để mô hình AI huấn luyện — càng dùng app lâu, tỉ lệ
-                        // dữ liệu thật càng cao dần, tự động, không cần làm gì thêm.
-                        const realArchive = loadRealArchive(gameType);
-                        const TARGET_TOTAL = 40;
-                        const neededSynthetic = Math.max(0, TARGET_TOTAL - realArchive.length);
-                        const synthetic = neededSynthetic > 0 ? generateSyntheticData(gameType).slice(0, neededSynthetic) : [];
-                        return [...realArchive, ...synthetic];
+                        // Trả về 100% dữ liệu THẬT đã tích luỹ được (không còn bù thêm dữ liệu mô phỏng) —
+                        // càng dùng app lâu / Cron ghi càng nhiều, kho dữ liệu thật càng lớn dần tự nhiên.
+                        return loadRealArchive(gameType);
                     } catch (e) {
                         lastError = e;
                         logTrain(`<span class="text-red-400">[Data]</span> ${label} lỗi (vòng ${pass + 1}): ${e.message || e}`);
@@ -975,10 +1004,7 @@
             const fallbackArchive = loadRealArchive(gameType);
             if (fallbackArchive.length >= 1) {
                 logTrain(`<b class="text-amber-400">[Data]</b> Không lấy được kỳ mới nhất lúc này, dùng ${fallbackArchive.length} kỳ thật đã lưu trước đó`);
-                const TARGET_TOTAL = 40;
-                const neededSynthetic = Math.max(0, TARGET_TOTAL - fallbackArchive.length);
-                const synthetic = neededSynthetic > 0 ? generateSyntheticData(gameType).slice(0, neededSynthetic) : [];
-                return [...fallbackArchive, ...synthetic];
+                return fallbackArchive;
             }
 
             throw lastError || new Error("Tất cả nguồn dữ liệu trực tuyến đều không phản hồi");
@@ -1020,36 +1046,6 @@
             }).filter(d => d.numbers && d.numbers.length > 0);
         }
 
-        function generateSyntheticData(gameType) {
-            const draws = [];
-            const now = new Date();
-            for (let i = 0; i < 60; i++) {
-                const drawDate = new Date(now - i * 2 * 86400000).toLocaleDateString('vi-VN');
-                let numbers = [];
-                if (gameType === 'mega645' || gameType === 'power655') {
-                    const maxNum = gameType === 'mega645' ? 45 : 55;
-                    const set = new Set();
-                    while (set.size < 6) set.add(getRandomInt(1, maxNum));
-                    numbers = Array.from(set).sort((a, b) => a - b);
-                    if (gameType === 'power655') {
-                        let spec = getRandomInt(1, maxNum);
-                        while (numbers.includes(spec)) spec = getRandomInt(1, maxNum);
-                        numbers.push(spec);
-                    }
-                } else if (gameType === 'lotto535') {
-                    const set = new Set();
-                    while (set.size < 5) set.add(getRandomInt(1, 35));
-                    numbers = [...Array.from(set).sort((a, b) => a - b), getRandomInt(1, 12)];
-                } else if (gameType === 'max3d') {
-                    numbers = [getRandomInt(0, 999).toString().padStart(3, '0')];
-                } else {
-                    numbers = [getRandomInt(0, 999).toString().padStart(3, '0'), getRandomInt(0, 999).toString().padStart(3, '0')];
-                }
-                draws.push({ id: `#00${1200 - i}`, date: drawDate, numbers: numbers });
-            }
-            return draws;
-        }
-
         function getNextDrawTime(gameType) {
             const now = new Date();
             if (gameType === 'lotto535') {
@@ -1076,7 +1072,10 @@
             const targetTime = getNextDrawTime(gameType);
             const dateStr = targetTime.toLocaleDateString('vi-VN');
             const dayName = daysVi[targetTime.getDay()];
-            const drawNum = getRandomInt(1150, 1350);
+            // Số kỳ quay tiếp theo = kỳ THẬT gần nhất (rawDraws[0].id) + 1 — không còn bịa số ngẫu nhiên.
+            // Nếu chưa có kỳ thật nào, không hiện số kỳ (tránh hiện số giả).
+            const latestRealId = (rawDraws && rawDraws[0] && rawDraws[0].id) ? parseInt(String(rawDraws[0].id).replace(/\D/g, ''), 10) : null;
+            const drawNumLabel = latestRealId ? ` #${String(latestRealId + 1).padStart(String(latestRealId).length, '0')}` : '';
 
             let gameName = "Mega 6/45";
             if (gameType === 'power655') gameName = "Power 6/55";
@@ -1085,7 +1084,7 @@
             if (gameType === 'max3dplus') gameName = "Max 3D+";
             if (gameType === 'max3dpro') gameName = "Max 3D Pro";
 
-            document.getElementById('next-draw-title').innerText = `${gameName} #${drawNum} (${dayName}, ${dateStr})`;
+            document.getElementById('next-draw-title').innerText = `${gameName}${drawNumLabel} (${dayName}, ${dateStr})`;
 
             if (timerInterval) clearInterval(timerInterval);
             function updateTimer() {
@@ -1203,8 +1202,16 @@
             const gameType = document.getElementById('game-type').value;
             let algoType = document.getElementById('algo-type').value;
 
-            if (!rawDraws || rawDraws.length < 1) {
-                rawDraws = generateSyntheticData(gameType);
+            // KHÔNG còn tạo dữ liệu giả để huấn luyện — nếu chưa có đủ kỳ quay THẬT, dừng lại và báo rõ
+            // cho người dùng thay vì sinh bộ số dựa trên số liệu bịa.
+            const MIN_REAL_DRAWS = 3;
+            if (!rawDraws || rawDraws.length < MIN_REAL_DRAWS) {
+                statusEl.innerText = "Chưa đủ dữ liệu thật";
+                clearTrainLog();
+                logTrain(`<b class="text-red-400">[Dừng]</b> Mới có ${rawDraws ? rawDraws.length : 0}/${MIN_REAL_DRAWS} kỳ quay thật — chưa đủ để huấn luyện AI trên dữ liệu thật. Hãy đợi Worker/Cron ghi thêm dữ liệu hoặc bấm "Thử lại" để lấy kỳ mới nhất.`);
+                btn.disabled = false;
+                btn.classList.remove('opacity-50', 'cursor-not-allowed');
+                return;
             }
 
             if (algoType === 'auto') {
@@ -1425,6 +1432,40 @@
                 prob: Math.max(prob, 0.001)
             }));
 
+            // Chọn 1 chữ số (0-9) CÓ TRỌNG SỐ theo digitProbs thật của mô hình — thay cho getRandomInt
+            // đồng xác suất trước đây (vốn hoàn toàn bỏ qua kết quả AI vừa huấn luyện).
+            function pickWeightedDigit(probsArr) {
+                const total = probsArr.reduce((s, p) => s + p, 0) || 1;
+                let r = Math.random() * total;
+                for (let d = 0; d < probsArr.length; d++) {
+                    r -= probsArr[d];
+                    if (r <= 0) return d;
+                }
+                return probsArr.length - 1;
+            }
+
+            // Số đặc biệt của Lotto 5/35 thuộc một phạm vi riêng (1-12), không nằm trong 35 số chính nên
+            // không có trong rawProbs — tính trọng số từ TẦN SUẤT THẬT xuất hiện ở vị trí số đặc biệt
+            // trong lịch sử kỳ quay thật (làm mượt Laplace +1 để không có trọng số 0 tuyệt đối), thay vì
+            // bốc hoàn toàn ngẫu nhiên như trước.
+            let lotto535SpecialWeights = null;
+            if (gameType === 'lotto535') {
+                lotto535SpecialWeights = Array(13).fill(1); // index 1..12, Laplace smoothing
+                (rawDraws || []).forEach(d => {
+                    const spec = d.numbers && d.numbers[5];
+                    if (spec >= 1 && spec <= 12) lotto535SpecialWeights[spec]++;
+                });
+            }
+            function pickWeightedSpecialLotto535() {
+                const total = lotto535SpecialWeights.reduce((s, p) => s + p, 0);
+                let r = Math.random() * total;
+                for (let n = 1; n <= 12; n++) {
+                    r -= lotto535SpecialWeights[n];
+                    if (r <= 0) return n;
+                }
+                return 12;
+            }
+
             for (let c = 0; c < count; c++) {
                 let selectedNumbers = [];
                 let isUnique = false;
@@ -1439,7 +1480,7 @@
 
                         if (gameType === 'power655') {
                             const remainCandidates = validCandidates.filter(x => !mainNums.includes(x.number));
-                            const spec = selectUniqueSet(remainCandidates, 1)[0] || getRandomInt(1, 55);
+                            const spec = selectUniqueSet(remainCandidates, 1)[0] || getRandomInt(1, maxNum);
                             selectedNumbers = [...mainNums, spec];
                         } else {
                             selectedNumbers = mainNums;
@@ -1448,14 +1489,14 @@
                     } else if (gameType === 'lotto535') {
                         const validCandidates = candidates.filter(x => x.number <= 35);
                         const mainNums = selectUniqueSet(validCandidates, 5).sort((a, b) => a - b);
-                        const spec = getRandomInt(1, 12);
+                        const spec = pickWeightedSpecialLotto535();
                         selectedNumbers = [...mainNums, spec];
 
                     } else if (gameType === 'max3d') {
-                        selectedNumbers = [`${getRandomInt(0, 9)}${getRandomInt(0, 9)}${getRandomInt(0, 9)}`];
+                        selectedNumbers = [`${pickWeightedDigit(digitProbs)}${pickWeightedDigit(digitProbs)}${pickWeightedDigit(digitProbs)}`];
 
                     } else {
-                        const gen3D = () => `${getRandomInt(0, 9)}${getRandomInt(0, 9)}${getRandomInt(0, 9)}`;
+                        const gen3D = () => `${pickWeightedDigit(digitProbs)}${pickWeightedDigit(digitProbs)}${pickWeightedDigit(digitProbs)}`;
                         let setA = gen3D();
                         let setB = gen3D();
                         while (setA === setB) setB = gen3D();
@@ -1535,15 +1576,13 @@
             flame.className = "w-3.5 h-3.5 text-slate-500";
         }
 
-        // Giá trị Jackpot ước tính hiển thị ĐỘC LẬP với điểm Meter — dùng số THẬT vừa đọc được từ
-        // vietlott.vn nếu có; nếu không (đang ở chế độ Backup) thì vẫn hiện số ước tính để không để trống.
-        // Gọi hàm này ở MỌI lần làm mới dữ liệu (kể cả khi kỳ quay chưa đổi), khác với resetJackpotMeter()
-        // vốn chỉ nên gọi khi thực sự cần vô hiệu hoá điểm AI cũ.
+        // Giá trị Jackpot hiển thị ĐỘC LẬP với điểm Meter — CHỈ dùng số THẬT vừa đọc được từ vietlott.vn.
+        // Không còn số ước tính ngẫu nhiên: nếu chưa đọc được jackpot thật, hiện "Đang cập nhật..." thay
+        // vì bịa một con số để không bỏ trống.
         function updateJackpotAmountDisplay() {
             const valDisplay = document.getElementById('jackpot-val-display');
             if (!valDisplay) return;
-            const jackpotAmount = lastRealJackpotBillionVnd ? lastRealJackpotBillionVnd.toFixed(1) : getRandomInt(30, 210);
-            valDisplay.innerText = `${jackpotAmount} Tỷ VNĐ`;
+            valDisplay.innerText = lastRealJackpotBillionVnd ? `${lastRealJackpotBillionVnd.toFixed(1)} Tỷ VNĐ` : 'Đang cập nhật...';
         }
 
         // ==== Thước đo Jackpot — viết lại theo đúng công thức trong file mẫu "Vietlott Super Grok AI" ====
@@ -1557,6 +1596,7 @@
         //   stability    — độ đa dạng số giữa các bộ vừa sinh so với kỳ vọng (không trùng lặp nhiều)
         //   dataQuality  — chất lượng/độ dài dữ liệu lịch sử thật đang có
         //   agreement    — độ đồng đều giữa các bộ vừa sinh (các bộ có "chất lượng" gần nhau)
+        //   validation   — các bộ vừa sinh có thực sự vượt mức xác suất "đồng đều ngẫu nhiên" (1/n) không
         // Toàn bộ chỉ mang tính giải trí/tham khảo — không phải xác suất trúng thưởng thật.
         function computeDynamicMeter(probs, generatedSets, gameType, dataLen) {
             if (!probs || !generatedSets || !generatedSets.length) return 0;
@@ -1623,7 +1663,13 @@
             const variance = setMeans.reduce((a, m) => a + (m - avgMean) * (m - avgMean), 0) / setMeans.length;
             const agreement = Math.max(0, 1 - Math.sqrt(variance) * 5);
 
-            const score = meanProb * 28 + topMass * 18 + concentration * 12 + separation * 10 + stability * 12 + dataQuality * 12 + agreement * 8;
+            // validation — các bộ số vừa sinh có thực sự vượt mức xác suất trung bình "đồng đều ngẫu
+            // nhiên" (1/n) hay không. Đây là phép kiểm tra chéo: nếu AI không học được gì hữu ích,
+            // meanProb sẽ xấp xỉ 1/n và validation tiến về 0, kéo điểm Meter xuống thấp một cách trung thực.
+            const uniformBaseline = 1 / Math.max(n, 2);
+            const validation = avgMean > uniformBaseline ? Math.min(1, (avgMean - uniformBaseline) / uniformBaseline) : 0;
+
+            const score = meanProb * 24 + topMass * 16 + concentration * 11 + separation * 9 + stability * 11 + dataQuality * 11 + agreement * 8 + validation * 10;
             return Math.min(99, Math.max(5, Math.round(score * 1.15 + meanProb * 40)));
         }
 
